@@ -69,6 +69,8 @@ bool downloadAndInstallDeps(string configurationPath, bool delegate(float progre
 ProvisioningData initializeADI(string configurationPath) {
     auto log = getLogger();
     auto device = new Device(configurationPath.buildPath("device.json"));
+    import std.algorithm.searching : canFind;
+    import std.regex : regex, replaceAll;
 
     if (!device.initialized) {
         log.info("Creating device...");
@@ -83,6 +85,10 @@ ProvisioningData initializeADI(string configurationPath) {
         device.adiIdentifier = (cast(ubyte[]) rndGen.take(2).array()).toHexString().toLower();
         device.localUserUUID = (cast(ubyte[]) rndGen.take(8).array()).toHexString().toUpper();
         log.info("Device created successfully.");
+    } else if (device.serverFriendlyDescription.canFind("com.apple.dt.Xcode")) {
+        // Apple 503s any GSA auth POST whose X-Mme-Client-Info contains "xcode"; strip the legacy Xcode token so a device.json provisioned before this fix still authenticates.
+        device.serverFriendlyDescription = device.serverFriendlyDescription.replaceAll(regex(` \(com\.apple\.dt\.Xcode/[^)]*\)`), "");
+        log.info("Stripped the legacy Xcode client-info token from the stored device descriptor.");
     }
     log.debug_("Device OK.");
 
