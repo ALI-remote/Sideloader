@@ -7,9 +7,13 @@ import std.datetime;
 import std.datetime.systime;
 import std.format;
 import std.sumtype;
+import std.string;
 import std.typecons;
 import std.uni;
 import std.zlib;
+
+import core.thread;
+import core.time;
 
 import botan.block.aes;
 import botan.block.aes_ni;
@@ -36,6 +40,39 @@ import constants;
 import server.applicationinformation;
 import server.applesrpsession;
 import utils;
+
+enum gsaUserAgent = "AuthKit/1 (Macintosh; OS X 26.5.2)";
+
+private struct GsaAuthResult {
+    bool ok;
+    int code;
+    string body;
+    int attempts;
+}
+
+private GsaAuthResult gsaAuthPost(string[string] headers, string url, string body) {
+    auto log = getLogger();
+    static immutable int[] backoffSeconds = [1, 2, 4, 8];
+    int lastCode = 0;
+    string lastBody = "";
+    foreach (attempt; 0 .. 5) {
+        Request request = Request();
+        request.keepAlive = false; // fresh connection each attempt, never reuse a soured GSA edge node
+        request.sslSetVerifyPeer(false);
+        request.addHeaders(headers);
+        auto response = request.post(url, body);
+        lastCode = cast(int) response.code;
+        lastBody = response.responseBody().data!string();
+        if (lastCode < 500 && lastBody.indexOf("<plist") >= 0) {
+            return GsaAuthResult(true, lastCode, lastBody, attempt + 1);
+        }
+        log.warnF!"GSA auth attempt %d/5 got HTTP %d (non-plist body); retrying on a fresh connection..."(attempt + 1, lastCode);
+        if (attempt < 4) {
+            Thread.sleep(dur!"seconds"(backoffSeconds[attempt]));
+        }
+    }
+    return GsaAuthResult(false, lastCode, lastBody, 5);
+}
 
 enum AppleLoginErrorCode {
     mismatchedSRP = 1,
@@ -131,9 +168,9 @@ package class AppleAccount {
 
                 "X-Apple-Identity-Token": identityToken,
 
-                "X-Mme-Client-Info": device.serverFriendlyDescription,
+                "X-Mme-Client-Info": "<MacBookPro13,2> <macOS;13.1;22C65> <com.apple.AuthKit/1 (com.apple.dt.Xcode/3594.4.19)>",
 
-                "User-Agent": applicationInformation.applicationName
+                "User-Agent": gsaUserAgent
             ]);
             request.addHeaders(applicationInformation.headers);
 
@@ -142,6 +179,7 @@ package class AppleAccount {
             if (urlBagKey == "trustedDeviceSecondaryAuth") {
                 sendCode = () {
                     auto res = request.get(urls["trustedDeviceSecondaryAuth"]);
+                    log.infoF!"2FA trusted-device push trigger -> HTTP %s"(res.code);
                     return res.code == 200;
                 };
             } else {
@@ -206,20 +244,16 @@ package class AppleAccount {
         Request request = Request();
         request.sslSetVerifyPeer(false); // FIXME: SSL pin
 
-        request.addHeaders([
+        string[string] gsaAuthHeaders = [
             "Content-Type": "text/x-xml-plist",
             "Accept": "text/x-xml-plist",
-
-            // "X-Mme-Device-Id": device.uniqueDeviceIdentifier,
-            // on macOS, MMe for the Client-Info header is written with 2 caps, while on Windows it is Mme...
-            // and HTTP headers are supposed to be case-insensitive in the HTTP spec...
             "X-Mme-Client-Info": device.serverFriendlyDescription,
-            // "X-Apple-I-MD-LU": device.localUserUUID
-
-            "User-Agent": applicationInformation.applicationName
-        ]);
-
-        request.addHeaders(applicationInformation.headers);
+            "User-Agent": gsaUserAgent
+        ];
+        foreach (headerName, headerValue; applicationInformation.headers) {
+            gsaAuthHeaders[headerName] = headerValue;
+        }
+        request.addHeaders(gsaAuthHeaders);
 
         // Fetch URLs from Apple servers
         log.debug_("Fetching URL bag...");
@@ -256,10 +290,14 @@ package class AppleAccount {
         log.trace(request1Str);
 
         log.debug_("Sending first auth request...");
-        auto response1Str = request.post(urls["gsService"], request1Str).responseBody().data!string();
+        auto response1Result = gsaAuthPost(gsaAuthHeaders, urls["gsService"], request1Str);
+        auto response1Str = response1Result.body;
         log.trace(response1Str);
+        if (!response1Result.ok) {
+            return AppleLoginResponse(AppleLoginError(AppleLoginErrorCode.unableToSignIn, format!"Apple GSA auth failed after %d attempts (last HTTP %s, non-plist body). Body: %s"(response1Result.attempts, response1Result.code, response1Str)));
+        }
+        log.infoF!"First auth request OK after %d attempt(s)."(response1Result.attempts);
         auto response1 = Plist.fromXml(response1Str)["Response"];
-        log.debug_("First auth request OK.");
 
         auto error1 = response1["Status"].dict().validateStatus();
         if (!error1.isNull()) {
@@ -291,9 +329,13 @@ package class AppleAccount {
         log.trace(request2Str);
 
         log.debug_("Sending the second request...");
-        auto response2Str = request.post(urls["gsService"], request2Str).responseBody().data!string();
+        auto response2Result = gsaAuthPost(gsaAuthHeaders, urls["gsService"], request2Str);
+        auto response2Str = response2Result.body;
         log.trace(response2Str);
-        log.debug_("Second request OK.");
+        if (!response2Result.ok) {
+            return AppleLoginResponse(AppleLoginError(AppleLoginErrorCode.unableToSignIn, format!"Apple GSA auth failed after %d attempts (last HTTP %s, non-plist body). Body: %s"(response2Result.attempts, response2Result.code, response2Str)));
+        }
+        log.infoF!"Second request OK after %d attempt(s)."(response2Result.attempts);
 
         auto response2 = Plist.fromXml(response2Str)["Response"].dict();
         auto status2 = response2["Status"].dict();
@@ -377,9 +419,13 @@ package class AppleAccount {
             string request3Str = request3.toXml();
             log.trace(request3Str);
 
-            auto response3Str = request.post(urls["gsService"], request3Str).responseBody().data!string();
+            auto response3Result = gsaAuthPost(gsaAuthHeaders, urls["gsService"], request3Str);
+            auto response3Str = response3Result.body;
             log.trace(response3Str);
-
+            if (!response3Result.ok) {
+                return AppleLoginResponse(AppleLoginError(AppleLoginErrorCode.unableToSignIn, format!"Apple GSA auth failed after %d attempts (last HTTP %s, non-plist body). Body: %s"(response3Result.attempts, response3Result.code, response3Str)));
+            }
+            log.infoF!"Apptokens request OK after %d attempt(s)."(response3Result.attempts);
             auto response3 = Plist.fromXml(response3Str)["Response"].dict();
             auto error3 = response3["Status"].dict().validateStatus();
             if (!error3.isNull()) {
@@ -474,7 +520,7 @@ package class AppleAccount {
             "Content-Type": "text/x-xml-plist",
             "Accept": "text/x-xml-plist",
             "Accept-Language": "en-us",
-            "User-Agent": appInfo.applicationName,
+            "User-Agent": gsaUserAgent,
 
             "X-Apple-I-Identity-Id": adsid,
             "X-Apple-GS-Token": token,
