@@ -179,7 +179,7 @@ package class AppleAccount {
             if (urlBagKey == "trustedDeviceSecondaryAuth") {
                 sendCode = () {
                     auto res = request.get(urls["trustedDeviceSecondaryAuth"]);
-                    log.infoF!"2FA trusted-device push trigger -> HTTP %s: %s"(res.code, res.responseBody().data!string());
+                    log.infoF!"2FA trusted-device push trigger -> HTTP %s"(res.code);
                     return res.code == 200;
                 };
             } else {
