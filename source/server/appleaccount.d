@@ -7,7 +7,7 @@ import std.datetime;
 import std.datetime.systime;
 import std.format;
 import std.json;
-import std.process;
+import std.process : environment;
 import std.sumtype;
 import std.string;
 import std.typecons;
