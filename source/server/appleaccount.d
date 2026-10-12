@@ -6,6 +6,8 @@ import std.base64;
 import std.datetime;
 import std.datetime.systime;
 import std.format;
+import std.json;
+import std.process;
 import std.sumtype;
 import std.string;
 import std.typecons;
@@ -104,6 +106,22 @@ alias NextLoginStepHandler = AppleSecondaryActionResponse delegate(string identi
 
 enum RINFO = "17106176";
 
+struct AnisetteOTP {
+    string oneTimePassword;
+    string machineIdentifier;
+}
+
+AnisetteOTP requestAnisette(ADI adi) {
+    auto remoteUrl = environment.get("SIDELOADER_ANISETTE_URL");
+    if (remoteUrl.length) {
+        Request request = Request();
+        auto remote = parseJSON(request.get(remoteUrl).responseBody().data!string());
+        return AnisetteOTP(remote["X-Apple-I-MD"].str, remote["X-Apple-I-MD-M"].str);
+    }
+    auto otp = adi.requestOTP(-2);
+    return AnisetteOTP(Base64.encode(otp.oneTimePassword), Base64.encode(otp.machineIdentifier));
+}
+
 package class AppleAccount {
     private Device device;
     private ADI adi;
@@ -151,15 +169,15 @@ package class AppleAccount {
 
             log.debug_("2FA with trusted device needed.");
             // 2FA is needed
-            auto otp = adi.requestOTP(-2);
+            auto otp = requestAnisette(adi);
             auto time = Clock.currTime();
 
             Request request = Request();
             request.sslSetVerifyPeer(false); // FIXME: SSL pin
 
             request.addHeaders(cast(string[string]) [
-                "X-Apple-I-MD": Base64.encode(otp.oneTimePassword),
-                "X-Apple-I-MD-M": Base64.encode(otp.machineIdentifier),
+                "X-Apple-I-MD": otp.oneTimePassword,
+                "X-Apple-I-MD-M": otp.machineIdentifier,
                 "X-Apple-I-MD-RINFO": "17106176",
 
                 "X-Apple-I-Client-Time": time.stripMilliseconds().toISOExtString(),
@@ -480,15 +498,15 @@ package class AppleAccount {
     }
 
     private static Plist clientProvidedData(ApplicationInformation applicationInformation, Device device, ADI adi) {
-        auto otp = adi.requestOTP(-2);
+        auto otp = requestAnisette(adi);
 
         return dict(
             // Time
             "X-Apple-I-Client-Time", Clock.currTime(UTC()).stripMilliseconds().toISOExtString().pl,
             // Anisette headers
-            "X-Apple-I-MD", Base64.encode(otp.oneTimePassword).pl,
+            "X-Apple-I-MD", otp.oneTimePassword.pl,
             "X-Apple-I-MD-LU", device.localUserUUID.pl,
-            "X-Apple-I-MD-M", Base64.encode(otp.machineIdentifier).pl,
+            "X-Apple-I-MD-M", otp.machineIdentifier.pl,
             "X-Apple-I-MD-RINFO", RINFO.pl,
 
             "X-Apple-I-SRL-NO", "0".pl,
@@ -512,7 +530,7 @@ package class AppleAccount {
     package Plist sendRequest(string url, Plist request) {
         auto rq = Request();
 
-        auto otp = adi.requestOTP(-2);
+        auto otp = requestAnisette(adi);
         auto time = Clock.currTime();
 
         rq.sslSetVerifyPeer(false); // FIXME: SSL pin
@@ -525,8 +543,8 @@ package class AppleAccount {
             "X-Apple-I-Identity-Id": adsid,
             "X-Apple-GS-Token": token,
 
-            "X-Apple-I-MD-M": Base64.encode(otp.machineIdentifier),
-            "X-Apple-I-MD": Base64.encode(otp.oneTimePassword),
+            "X-Apple-I-MD-M": otp.machineIdentifier,
+            "X-Apple-I-MD": otp.oneTimePassword,
             "X-Apple-I-MD-LU": device.localUserUUID(),
             "X-Apple-I-MD-RINFO": RINFO,
 
