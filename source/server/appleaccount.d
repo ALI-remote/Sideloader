@@ -115,6 +115,7 @@ AnisetteOTP requestAnisette(ADI adi) {
     auto remoteUrl = environment.get("SIDELOADER_ANISETTE_URL");
     if (remoteUrl.length) {
         Request request = Request();
+        request.addHeaders(["X-Ani-Token": environment.get("SIDELOADER_ANISETTE_TOKEN", "")]);
         auto remote = parseJSON(request.get(remoteUrl).responseBody().data!string());
         return AnisetteOTP(remote["X-Apple-I-MD"].str, remote["X-Apple-I-MD-M"].str);
     }
